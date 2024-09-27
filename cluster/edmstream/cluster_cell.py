@@ -41,6 +41,9 @@ class ClusterCell:
         self.term_threshold = term_threshold
         self._tf = Counter(document)
 
+    def __repr__(self):
+        return f"ClusterCell({str(self.id)})"
+
     def _decay_density(self, timestamp):
         """Applies time decay to the density of the cluster-cell."""
         # Check for a proper timestamp

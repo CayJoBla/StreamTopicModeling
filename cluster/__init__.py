@@ -1,1 +1,1 @@
-from edmstream import EDMStream
+from .edmstream import EDMStream

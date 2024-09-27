@@ -30,7 +30,7 @@ class EDMStream:
         self,
         decay_factor: float = 0.98,
         alpha: Optional[float] = 0.5,   # TODO: Finalize decision on how to choose this
-        beta: float = 1e-3,
+        beta: float = 2e-3,
         epsilon: float = 0.1,
         stream_speed: int = 128,
         num_initial_cells: int = 10,
@@ -47,7 +47,7 @@ class EDMStream:
 
         # Initialize outlier parameters
         max_total_density = self.stream_speed / (1-self.decay_factor)
-        if (1/max_total_density < beta < 1):    # Check beta input value
+        if not (1/max_total_density < beta < 1):    # Check beta input value
             raise ValueError("Beta value is outside the acceptable range.")
         self.density_threshold = beta * max_total_density
         self.T_del = math.log(1/self.density_threshold, self.decay_factor) \
@@ -96,6 +96,7 @@ class EDMStream:
                     density = cluster_cell.get_density(self.timestamp)
                     if density >= self.density_threshold:
                         self.tree.insert(cluster_cell, self.timestamp)
+                        self.outlier_cells.remove(cluster_cell)
 
                 return cluster_cell.id
 
@@ -118,15 +119,15 @@ class EDMStream:
         elif x.shape[0] != self.ndim:   # Check input feature size
             raise ValueError(f"Input features ({x.shape[0]}) do not match the "\
                                 f"expected size ({self.ndim}).")
-        else:
-            self.timestamp += self._t_per_sample    # Update the timestamp
+        
+        self.timestamp += self._t_per_sample    # Update the timestamp
 
         # Assign new point to a cluster-cell
         cluster_cell_id = self.assign(x, document)
 
         # Remove decayed inactive cells from the tree
-        new_outliers = self.tree.remove_outliers(self.timestamp, 
-                                                    self.density_threshold)
+        new_outliers = self.tree.pop_inactive(self.timestamp, 
+                                                self.density_threshold)
         self.outlier_cells.extend(new_outliers)
 
         # Remove outliers that have not received points in a while
@@ -136,6 +137,25 @@ class EDMStream:
                 (self.timestamp - cell.t_insert) <= self.T_del
             ]
             self.t_last_outlier_check = self.timestamp
+
+        # TODO: REMOVE LATER; Check that dependency order is maintained
+        for i, cell in enumerate(self.tree.cluster_cells[:-1]):
+            if not self.tree.initialized:
+                break
+            density = cell.get_density(self.timestamp)
+            dep_density = self.tree[cell.dependency].get_density(self.timestamp)
+            if cell.dependency not in self.tree.ids[i+1:]:
+                print("Timestamp:\t", self.timestamp)
+                print("Updated cell:\t", cluster_cell_id)
+                print("Cluster-cell:\t", cell.id)
+                print("Dependency:\t", cell.dependency)
+                if density > dep_density:
+                    raise ValueError("Cluster-cell has a higher density than its dependency.")
+                else:
+                    raise ValueError("Cluster-cell dependency is not in the tree.")
+            else:
+                if density > dep_density:
+                    raise ValueError("Density order has not been maintained.")
 
     def _get_dynamic_tao(self):
         """This function chooses the distance threshold (tao) that minimizes
@@ -148,30 +168,65 @@ class EDMStream:
         these two objectives.
         """
         # Check cell count and address potential issues
-        num_cells = len(self._cluster_cells)
-        if num_cells <= 1:  # If no cells, then tao doesn't matter
+        num_cells = len(self.tree._cluster_cells)
+        if num_cells <= 1:  # If no cells, then tao doesn't matter``
             return 0        # If one cell, then cell is its own cluster
 
         # Sort dependent distances and drop the cell with no dependencies
         dependent_dists = np.sort([cell.dependent_dist for cell in 
-                                    self._cluster_cells.values()])[:-1]
+                                    self.tree._cluster_cells.values()])[:-1]
         tao_vals = np.insert(dependent_dists, 0, 0)     # Add tao = 0
         cum_dist_sum = np.cumsum(tao_vals)
+        mean_dist = np.mean(dependent_dists)
+        total_sum = cum_dist_sum[-1]
 
         # Compute the loss function for each tao (custom loss)
+        # print("\nVersion 1")
+        # m = np.arange(1, num_cells)
+        # n = num_cells - m
+        # inter_cell_loss, intra_cell_loss = np.zeros((2,num_cells))
+        # inter_cell_loss[:-1] = (cum_dist_sum[:-1] - cum_dist_sum[-1]) / n
+        # intra_cell_loss[1:] = cum_dist_sum[1:] / m
+        # print(inter_cell_loss)
+        # print(intra_cell_loss)
+        # loss = self.alpha * inter_cell_loss + (1-self.alpha) * intra_cell_loss
+        # print("Loss:\t", loss)
+        # print("Min tao:\t", tao_vals[np.argmin(loss)])
+
+        # print("\nVersion 2")
+        # total_sum = cum_dist_sum[-1]
+        # print(cum_dist_sum)
+        # inter_cell_loss, intra_cell_loss = np.zeros((2,num_cells))
+        # inter_cell_loss[:-1] = (total_sum - cum_dist_sum[:-1]) / (n * mean_dist)
+        # intra_cell_loss[1:] = (m * mean_dist) / cum_dist_sum[1:]
+        # print(inter_cell_loss)
+        # print(intra_cell_loss)
+        # inter_cell_loss[:-1] *= self.alpha
+        # intra_cell_loss[1:] *= (1-self.alpha)
+        # loss2 = inter_cell_loss + intra_cell_loss
+        # print("Loss2:\t", loss2)
+        # print("Min tao2:\t", tao_vals[np.argmin(loss2)])
+
+        print("\nVersion 3")
         m = np.arange(1, num_cells)
         n = num_cells - m
-        intra_cell_loss, inter_cell_loss = np.zeros(2, num_cells)
-        intra_cell_loss[1:] = cum_dist_sum[1:] / m
-        inter_cell_loss[:-1] = (cum_dist_sum[:-1] - cum_dist_sum[-1]) / n
+        inter_cell_loss, intra_cell_loss = np.zeros((2,num_cells))
+        inter_cell_loss[:-1] = (n * mean_dist) / (total_sum - cum_dist_sum[:-1])
+        intra_cell_loss[1:] = cum_dist_sum[1:] / (m * mean_dist)
+        print(inter_cell_loss)
+        print(intra_cell_loss)
+        # inter_cell_loss[1:] *= self.alpha
+        # intra_cell_loss[:-1] *= (1-self.alpha)
+        # loss = inter_cell_loss + intra_cell_loss
         loss = self.alpha * inter_cell_loss + (1-self.alpha) * intra_cell_loss
+        print("Loss:\t", loss)
 
         # Return the value of tao that results in the lowest loss
         return tao_vals[np.argmin(loss)]
 
     def predict(self, X, static_dist_threshold=None):
         # Check input shape
-        X = np.atleast2d(X)
+        X = np.atleast_2d(X)
         if not self.tree.initialized:
             raise ValueError("The DP-Tree has not been initialized, and so "
                                 "predictions cannot be made. Consider training "
@@ -182,7 +237,7 @@ class EDMStream:
         seeds = np.array([self.tree[cell_id].seed for cell_id in self.tree.ids])
 
         # Initialize cluster labels
-        labels = np.full(X.shape[0], -1)
+        labels = [-1] * X.shape[0]
         if seeds.shape[0] == 0:     # No active cluster cells, all outliers
             return labels
 
@@ -192,21 +247,18 @@ class EDMStream:
             distance_threshold = self._get_dynamic_tao()
         clusters, cluster_labels = self.tree.query_subtrees(distance_threshold)
 
-        c_tf_idf = self._get_tf_idf(cluster_labels)
+        # c_tf_idf = self._get_tf_idf(cluster_labels)
  
-
-        # TODO: Fix these labels
         # Label points with the cluster of the closest cell
         distances = np.linalg.norm(seeds[None,:,:] - X[:,None,:], axis=-1)
         closest_cell_indices = np.argmin(distances, axis=1)
         for i, close_idx in enumerate(closest_cell_indices):
-            if distances[close_idx] <= self.radius:
+            if distances[i][close_idx] <= self.radius:
                 labels[i] = cluster_labels[self.tree.ids[close_idx]]
         
         return labels
 
     def _get_tf_idf(self, cluster_labels):
-        num_clusters = len(clusters)
         unique_terms = set()
 
         # Get all unique words (TODO: Maybe track this globally instead?) 
@@ -215,7 +267,7 @@ class EDMStream:
             unique_terms.update(cell_tf.keys())
 
         # Build the term frequency matrix
-        frequencies = np.zeros((num_clusters, len(unique_terms)))
+        frequencies = np.zeros((len(self.tree), len(unique_terms)))
         unique_terms = list(unique_terms)
         for cell_id, cluster_id in cluster_labels.items():
             cell_tf = self.tree[cell_id].get_tf(self.timestamp)

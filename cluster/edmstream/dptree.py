@@ -98,16 +98,16 @@ class DPTree:
         # Update the dependencies and dependent distances of the cluster-cells
         return self.update_dependencies(idx, self._sorted_ids[:idx])
 
-    def remove_outliers(self, timestamp, density_threshold):
+    def pop_inactive(self, timestamp, density_threshold):
         """Remove any cluster-cells whose densities have fallen below the 
-        density threshold. Returns the list of outlier cluster-cells that were 
+        density threshold. Returns the list of inactive cluster-cells that were 
         removed.
 
         Args:
             timestamp (float): The current timestamp, used to determine the 
                 current timely-density of cluster-cells.
             density_threshold (float): The density value at which cluster-cells 
-                are considered outliers and are removed.
+                are considered inactive and are removed.
 
         Returns:
             (list): A list of the outlier cluster-cells that were removed.
@@ -118,15 +118,16 @@ class DPTree:
         # Find the first cluster-cell that satisfies the density threshold
         for idx, cell_id in enumerate(self._sorted_ids):
             cluster_cell = self._cluster_cells[cell_id]
-            if cluster_cell.get_density(timestamp) > density_threshold:
+            if cluster_cell.get_density(timestamp) >= density_threshold:
                 break
         
         # Remove and return the outlier cluster-cells
+        outlier_cells = [self._cluster_cells.pop(cell_id) 
+                            for cell_id in self._sorted_ids[:idx]]
         self._sorted_ids = self._sorted_ids[idx:]
         if len(self._sorted_ids) == 0:
             self.initialized = False    # Reset the tree if no active cells
-        return [self._cluster_cells.pop(cell_id) 
-                for cell_id in self._sorted_ids[:idx]]
+        return outlier_cells
 
     def assign_point_to_cell(self, cell_id, timestamp, cell_distances, 
                              document=None):
@@ -153,14 +154,18 @@ class DPTree:
 
             # Density Filter
             current_cell = self._cluster_cells[current_cell_id]
-            current_density = current_cell.get_density(self.timestamp)
-            if new_density <= current_density:
+            if new_density <= current_cell.get_density(timestamp):
                 idx -= 1  
                 break       # Filter satisfied, no need to check further
 
             # Bubble sort: _sorted_ids[idx] should become the updated cell
             self._sorted_ids[idx], self._sorted_ids[idx-1] = \
                 self._sorted_ids[idx-1], self._sorted_ids[idx]
+
+            # Reset the dependency if updated cell depends on current cell
+            if cluster_cell.dependency == current_cell_id:
+                cluster_cell.dependency = None
+                cluster_cell.dependent_dist = np.inf
 
             # Tri-Ineq Filter 
             difference = abs(cell_distances[idx]-cell_distances[sorted_idx])
@@ -208,16 +213,15 @@ class DPTree:
             # If the updated cell is the highest density, it has no dependencies
             cluster_cell.dependency = None
             cluster_cell.dependent_dist = np.inf
-        elif (cluster_cell.dependency in to_update) or \
-                (cluster_cell.dependency is None):
-            # Only update dependency if the current dependency is now a lower
-            # density (in the to_update list) or if the current cell is new
+        elif (cluster_cell.dependency is None):
+            # Only update dependency if the cell is new or the dependency was
+            # reset (old dependency is now less dense than the updated cell)
             greater_ids = self._sorted_ids[sorted_cell_idx+1:]
             greater_seeds = np.array([self._cluster_cells[cell_id].seed 
                                         for cell_id in greater_ids])
             greater_dists = np.linalg.norm(greater_seeds - cluster_cell.seed, 
                                             axis=1)
-            min_idx = np.argmin(distances)
+            min_idx = np.argmin(greater_dists)
             cluster_cell.dependency = greater_ids[min_idx]
             cluster_cell.dependent_dist = greater_dists[min_idx]
             caused_update = True
